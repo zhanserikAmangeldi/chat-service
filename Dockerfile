@@ -7,14 +7,14 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o chat-service ./cmd/server/main.go
+RUN go build -o chat-service ./cmd/main.go
 
 FROM alpine:3.19
 
 WORKDIR /app
 COPY --from=builder /app/chat-service .
+COPY --from=builder /app/internal/migration/migrations ./internal/migration/migrations
 
-
-EXPOSE 8080 9090
+EXPOSE 8081 9091
 
 CMD ["./chat-service"]

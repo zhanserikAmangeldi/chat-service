@@ -2,82 +2,68 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
-	grpcClient "github.com/zhanserikAmangeldi/chat-service/internal/grpc"
+	"github.com/golang-jwt/jwt/v5"
 )
 
-type AuthMiddleware struct {
-	userService *grpcClient.UserServiceClient
-	jwtSecret   string
+type contextKey string
+
+const UserIDKey contextKey = "user_id"
+
+func AuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				http.Error(w, "missing authorization header", http.StatusUnauthorized)
+				return
+			}
+
+			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+			if tokenString == authHeader {
+				http.Error(w, "invalid authorization format", http.StatusUnauthorized)
+				return
+			}
+
+			token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+				}
+				return []byte(jwtSecret), nil
+			})
+
+			if err != nil || !token.Valid {
+				http.Error(w, "invalid token", http.StatusUnauthorized)
+				return
+			}
+
+			claims, ok := token.Claims.(jwt.MapClaims)
+			if !ok {
+				http.Error(w, "invalid token claims", http.StatusUnauthorized)
+				return
+			}
+
+			userIDFloat, ok := claims["user_id"].(float64)
+			if !ok {
+				http.Error(w, "invalid user_id in token", http.StatusUnauthorized)
+				return
+			}
+			userID := int64(userIDFloat)
+
+			ctx := context.WithValue(r.Context(), UserIDKey, userID)
+
+			r.Header.Set("X-User-ID", strconv.FormatInt(userID, 10))
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
-func NewAuthMiddleware(userService *grpcClient.UserServiceClient, jwtSecret string) *AuthMiddleware {
-	return &AuthMiddleware{
-		userService: userService,
-		jwtSecret:   jwtSecret,
-	}
-}
-
-func (m *AuthMiddleware) Authenticate() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		token := m.extractToken(c)
-		if token == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": "missing authentication token",
-			})
-			c.Abort()
-			return
-		}
-
-		resp, err := m.userService.ValidateToken(context.Background(), token)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "failed to validate token",
-			})
-			c.Abort()
-			return
-		}
-
-		if !resp.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": resp.Error,
-			})
-			c.Abort()
-			return
-		}
-
-		c.Set("user_id", resp.UserId)
-		c.Set("username", resp.Username)
-		c.Set("email", resp.Email)
-		c.Set("token", token)
-
-		c.Next()
-	}
-}
-
-func (m *AuthMiddleware) extractToken(c *gin.Context) string {
-	authHeader := c.GetHeader("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			return parts[1]
-		}
-	}
-
-	if token := c.Query("token"); token != "" {
-		return token
-	}
-
-	if cookie, err := c.Cookie("auth_token"); err == nil && cookie != "" {
-		return cookie
-	}
-
-	if token := c.GetHeader("X-Auth-Token"); token != "" {
-		return token
-	}
-
-	return ""
+func GetUserID(r *http.Request) (int64, bool) {
+	userID, ok := r.Context().Value(UserIDKey).(int64)
+	return userID, ok
 }
